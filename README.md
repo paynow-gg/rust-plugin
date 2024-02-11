@@ -1,6 +1,6 @@
-# PayNow Plugin for Rust
+# PayNow Plugin for Rust / Hurtworld / 7 Days To Die
 
-The official PayNow addon for Rust servers enables seamless integration with PayNow gameservers, facilitating in-game transactions and more. This guide will help you set up the PayNow plugin on your server.
+The official PayNow addon seamlessly integrates with game servers for Rust, Hurtworld, and 7 Days to Die, facilitating in-game transactions and enhancing gameplay with secure and efficient financial interactions. This guide will help you set up the PayNow plugin on your server for any of these supported games.
 
 ## Prerequisites
 
