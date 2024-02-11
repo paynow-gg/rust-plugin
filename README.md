@@ -26,9 +26,7 @@ Replace `<token>` with your actual PayNow token.
 
 ### Adjusting Fetch Interval
 
-The default fetch interval is recommended for most servers, but you can adjust it to meet your specific needs by modifying the config
-
-Replace `<seconds>` with the desired interval in seconds. It's recommended to keep the default setting unless you have a specific reason to change it.
+The default fetch interval is recommended for most servers, but you can adjust it to meet your specific needs by modifying the config.
 
 ## Support
 
