@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Libraries;
@@ -9,301 +10,294 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info( "PayNow", "Mr. Blue", "0.0.2" )]
+    [Info("PayNow", "PayNow Services Inc", "0.0.7")]
     internal class PayNow : CovalencePlugin
     {
-        #region Variables
+        const string API_URL = "https://api.paynow.gg/v1/delivery/command-queue/";
 
-        private const string API_URL = "https://api.paynow.gg/v1/delivery/command-queue/";
+        PluginConfig _config;
 
-        private PluginConfig _config;
-        
-        private Dictionary<string, string> _headers = new Dictionary<string, string>();
+        readonly Dictionary<string, string> _headers = new Dictionary<string, string>();
+        readonly CommandHistory _executedCommands = new CommandHistory(25);
+        readonly StringBuilder _cachedStringBuilder = new StringBuilder();
+        readonly List<string> _successfulCommandsList = new List<string>(1000);
 
-        private CommandHistory _executedCommands = new CommandHistory( 25 );
+        #region Oxide
 
-        #endregion
-
-        #region Configuration
-
-        [Serializable]
-        private class PluginConfig
-        {
-            public string ApiToken;
-        }
-
-        protected override void LoadDefaultConfig()
-        {
-            Config.WriteObject( new PluginConfig(), true );
-        }
-
-        #endregion
-
-        #region Hooks
-
-        [HookMethod( "Init" )]
-        private void Init()
+        [HookMethod("Init")]
+        void Init()
         {
             _config = Config.ReadObject<PluginConfig>();
-            _headers = GetHeaders( _config.ApiToken );
+            UpdateHeaders();
         }
 
-        [HookMethod( "Loaded" )]
-        private void Loaded()
+        [HookMethod("Loaded")]
+        void Loaded()
         {
-            RetrieveApiData();
-            timer.Every( 10f, RetrieveApiData );
+            GetPendingCommands();
+            timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
         }
 
-        #endregion
-
-        #region Commands
-
-        [Command( "paynow.token" )]
-        private void CommandToken( IPlayer player, string command, string[] args )
+        [Command("paynow.token")]
+        void CommandToken(IPlayer player, string command, string[] args)
         {
-            if( !player.IsServer || !player.IsAdmin )
-            {
+            if (!player.IsServer || !player.IsAdmin)
                 return;
-            }
 
-            if( args.Length != 1 )
+            if (args.Length != 1)
             {
-                player.Reply( "Usage: paynow.token <token>" );
+                player.Reply("Usage: paynow.token <token>");
                 return;
             }
 
             //TODO: Validate token?
-            
+
             _config.ApiToken = args[0];
-            Config.WriteObject( _config, true );
+            Config.WriteObject(_config, true);
 
-            _headers = GetHeaders( _config.ApiToken );
+            UpdateHeaders();
 
-            player.Reply( "Token set!" );
+            player.Reply("Token set!");
         }
 
         #endregion
 
-        #region Api Logic
+        #region WebRequests
 
-        private void RetrieveApiData()
+        void GetPendingCommands()
         {
             try
             {
                 // Make the API call
-                webrequest.Enqueue( API_URL, null, HandleApiReceiveData, this, RequestMethod.GET, _headers );
+                webrequest.Enqueue(API_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers);
             }
-            catch( Exception ex )
+            catch (Exception ex)
             {
-                PrintException( "Failed retrieve PayNow Donations! (RetrieveApiData Exception)", ex );
+                PrintException("Failed retrieve get pending commands", ex);
             }
         }
 
-        private void HandleApiReceiveData( int code, string response )
+        void HandlePendingCommands(int code, string response)
         {
             try
             {
                 // Check if we got a valid response
-                if( code != 200 || response == null )
-                {
-                    throw new Exception( $"Failed retrieve PayNow Commands! (WebRequest failed!) ({code}) ({response})" );
-                }
+                if (code != 200 || response == null)
+                    throw new Exception($"Server sent an invalid response: ({code}) ({response})");
 
                 // Deserialize the response
-                QueuedCommand[] data = JsonConvert.DeserializeObject<QueuedCommand[]>( response );
-                if( data == null )
-                {
-                    throw new Exception( $"Failed retrieve PayNow Commands! (JsonConvert failed!) ({response})" );
-                }
+                QueuedCommand[] data = JsonConvert.DeserializeObject<QueuedCommand[]>(response);
+                if (data == null)
+                    throw new Exception($"Response deserialized to null: ({response})");
 
                 // Process the data
-                HandleApiData( data );
+                ProcessPendingCommands(data);
             }
-            catch( Exception ex )
+            catch (Exception ex)
             {
-                PrintException( "Failed retrieve PayNow Commands! (JsonConvert Exception)", ex );
+                PrintException("Failed handle pending commands", ex);
             }
         }
 
-        private void AcknowledgeCommands( List<string> orderIds )
+        void AcknowledgeCommands(List<string> commandsIds)
         {
             // Check if we have any order ids to acknowledge
-            if( orderIds.Count == 0 )
-            {
-                return;
-            }
-
-            // Serialize the data
-            string json = BuildAcknowledgeJson( orderIds );
+            if (commandsIds.Count == 0) return;
 
             try
             {
                 // Make the API call to acknowledge the commands
-                webrequest.Enqueue( API_URL, json, HandleAcknowledgement, this, RequestMethod.DELETE, _headers );
+                webrequest.Enqueue(API_URL, BuildAcknowledgeJson(commandsIds), HandleAcknowledgeCommands, this, RequestMethod.DELETE, _headers);
             }
-            catch( Exception ex )
+            catch (Exception ex)
             {
-                PrintException( "Failed to acknowledge PayNow Donation! (AcknowledgeCommands Exception)", ex );
+                PrintException("Failed to acknowledge commands", ex);
             }
         }
 
-        private void HandleAcknowledgement( int code, string response )
+        void HandleAcknowledgeCommands(int code, string response)
         {
             // Check if we got a valid response
-            if( code == 204 )
-            {
-                return;
-            }
+            if (code >= 200 && code < 300) return;
 
             // Log an error if we didn't get a 204 response
-            PrintError( $"Failed to acknowledge PayNow Donation! (HandleAcknowledgement) ({code}) ({response})" );
+            PrintError($"Command acknowledgement resulted in an unexpected response code: ({code.ToString()}) ({response})");
         }
 
         #endregion
 
-        #region Api Handling
+        #region Command Processing
 
-        private void HandleApiData( QueuedCommand[] queuedCommands )
+        void ProcessPendingCommands(QueuedCommand[] queuedCommands)
         {
             // Check if we got any data
-            // if( queuedCommands.Length == 0 )
-            // {
-            //     return;
-            // }
+            if (queuedCommands.Length == 0)
+                return;
 
-            List<string> successfulCommands = new List<string>();
-            foreach( QueuedCommand command in queuedCommands )
+            _successfulCommandsList.Clear();
+            for (int i = 0; i < queuedCommands.Length; i++)
             {
+                QueuedCommand command = queuedCommands[i];
+
                 // Make sure we don't execute the same command twice
-                if( _executedCommands.Contains( command.AttemptId ) )
-                {
+                if (_executedCommands.Contains(command.AttemptId))
                     continue;
-                }
 
                 try
                 {
-                    // Try executing the commands for the donation
-                    if( ExcecuteDonation( command.Command ) )
+                    if (command.OnlineOnly && players.Connected.All(x => x.Id != command.SteamId))
+                        continue;
+
+                    // Try executing the command
+                    if (ExecuteCommand(command.Command))
                     {
                         // Add the order id to the list of acknowledged orders
-                        successfulCommands.Add( command.AttemptId );
-                        _executedCommands.Add( command.AttemptId );
+                        _successfulCommandsList.Add(command.AttemptId);
+                        _executedCommands.Add(command.AttemptId);
                     }
                     else
                     {
                         // Log an error if the command failed
-                        PrintWarning( $"Failed to run command {command.Command} ({command.AttemptId})!" );
+                        PrintWarning($"Failed to run command {command.Command} ({command.AttemptId})!");
                     }
                 }
-                catch( Exception ex )
+                catch (Exception ex)
                 {
                     // Log an error if an exception occurs
-                    PrintException( "Failed to execute donation!", ex );
+                    PrintException("Failed to execute command", ex);
                 }
             }
 
             // Log the amount of commands we executed
-            Puts( $"Received {queuedCommands.Length} and executed {successfulCommands.Count} commands!" );
+            Puts($"Received {queuedCommands.Length.ToString()} and executed {_successfulCommandsList.Count.ToString()} commands!");
 
-            // Acknowledge the donations
-            AcknowledgeCommands( successfulCommands );
+            // Acknowledge the commands
+            AcknowledgeCommands(_successfulCommandsList);
         }
 
-        private bool ExcecuteDonation( string command )
+        bool ExecuteCommand(string command)
         {
             // Run the command
-            server.Command( command );
+            server.Command(command);
 
-            // TODO: Check if the command ran properly
+            // TODO: Fetch Command Response, currently not possible when using oxide covalence libraries 
 
             return true;
         }
 
         #endregion
 
-        #region Api Classes
+        #region Api DTOs
 
         [Serializable]
         public class QueuedCommand
         {
-            [JsonProperty( "attempt_id" )] public string AttemptId;
+            [JsonProperty("attempt_id")] public string AttemptId;
 
-            [JsonProperty( "command" )] public string Command;
+            [JsonProperty("steam_id")] public string SteamId;
 
-            [JsonProperty( "queued_at" )] public string QueuedAt;
+            [JsonProperty("command")] public string Command;
+
+            [JsonProperty("online_only")] public bool OnlineOnly;
+
+            [JsonProperty("queued_at")] public string QueuedAt;
+        }
+
+        #endregion
+
+        #region Configuration
+
+        [Serializable]
+        class PluginConfig
+        {
+            public string ApiToken;
+            public float ApiCheckIntervalSeconds = 10;
+        }
+
+        protected override void LoadDefaultConfig()
+        {
+            Config.WriteObject(new PluginConfig(), true);
         }
 
         #endregion
 
         #region Helpers
 
-        private string BuildAcknowledgeJson( List<string> orderIds )
+        void UpdateHeaders()
         {
-            StringBuilder sb = new StringBuilder();
+            _headers["Content-Type"] = "application/json";
+            _headers["Authorization"] = "Gameserver " + _config.ApiToken;
+        }
+
+        string BuildAcknowledgeJson(List<string> orderIds)
+        {
+            _cachedStringBuilder.Clear();
 
             // Json format [{"attempt_id": "123"}]
-            sb.Append( "[" );
-            for( int i = 0; i < orderIds.Count; i++ )
+            _cachedStringBuilder.Append("[");
+            for (int i = 0; i < orderIds.Count; i++)
             {
-                sb.Append( "{\"attempt_id\": \"" );
-                sb.Append( orderIds[i] );
-                sb.Append( "\"}" );
+                _cachedStringBuilder.Append("{\"attempt_id\": \"");
+                _cachedStringBuilder.Append(orderIds[i]);
+                _cachedStringBuilder.Append("\"}");
 
-                if( i < orderIds.Count - 1 )
+                if (i < orderIds.Count - 1)
                 {
-                    sb.Append( "," );
+                    _cachedStringBuilder.Append(",");
                 }
             }
-            sb.Append( "]" );
 
-            return sb.ToString();
+            _cachedStringBuilder.Append("]");
+
+            return _cachedStringBuilder.ToString();
         }
 
-        private Dictionary<string, string> GetHeaders( string token )
+        string BuildOnlinePlayersJson()
         {
-            return new Dictionary<string, string>
+            _cachedStringBuilder.Clear();
+
+            // Json format {"steam_ids": ["123"]}
+            _cachedStringBuilder.Append("{\"steam_ids\":[");
+            var addedPlayers = false;
+            foreach (var player in players.Connected)
             {
-                ["Content-Type"] = "application/json",
-                ["Authorization"] = "Gameserver " + token
-            };
+                addedPlayers = true;
+                _cachedStringBuilder.Append("\"");
+                _cachedStringBuilder.Append(player.Id);
+                _cachedStringBuilder.Append("\"");
+                _cachedStringBuilder.Append(",");
+            }
+
+            if (addedPlayers) _cachedStringBuilder.Remove(_cachedStringBuilder.Length - 1, 1);
+
+            _cachedStringBuilder.Append("]}");
+
+            return _cachedStringBuilder.ToString();
         }
 
-        private class CommandHistory
+        class CommandHistory
         {
-            private Queue<string> _queue;
-            private int _capacity;
+            readonly Queue<string> _queue;
+            readonly int _capacity;
 
-            public CommandHistory( int capacity )
+            public CommandHistory(int capacity)
             {
                 _capacity = capacity;
-                _queue = new Queue<string>( capacity );
+                _queue = new Queue<string>(capacity);
             }
 
-            public void Add( string command )
+            public void Add(string command)
             {
-                if( _queue.Count >= _capacity )
-                {
+                if (_queue.Count >= _capacity)
                     _queue.Dequeue();
-                }
 
-                _queue.Enqueue( command );
+                _queue.Enqueue(command);
             }
 
-            public bool Contains( string command )
-            {
-                return _queue.Contains( command );
-            }
+            public bool Contains(string command) => _queue.Contains(command);
         }
 
-        #endregion
-
-        #region Logging
-
-        private void PrintException( string message, Exception ex )
-        {
-            Interface.Oxide.LogException( $"[{Title}] {message}", ex );
-        }
+        void PrintException(string message, Exception ex) => Interface.Oxide.LogException($"[{Title}] {message}", ex);
 
         #endregion
     }
