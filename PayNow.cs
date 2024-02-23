@@ -10,7 +10,8 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.7")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.8")]
+    [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
         const string API_URL = "https://api.paynow.gg/v1/delivery/command-queue/";
@@ -23,17 +24,14 @@ namespace Oxide.Plugins
         readonly List<string> _successfulCommandsList = new List<string>(1000);
 
         #region Oxide
-
-        [HookMethod("Init")]
-        void Init()
-        {
-            _config = Config.ReadObject<PluginConfig>();
-            UpdateHeaders();
-        }
-
+        
         [HookMethod("Loaded")]
         void Loaded()
         {
+            if (string.IsNullOrEmpty(_config.ApiToken))
+                PrintWarning("No API token set! Use the 'paynow.token <token>' command to set it.");
+                
+            UpdateHeaders();
             GetPendingCommands();
             timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
         }
@@ -41,7 +39,7 @@ namespace Oxide.Plugins
         [Command("paynow.token")]
         void CommandToken(IPlayer player, string command, string[] args)
         {
-            if (!player.IsServer || !player.IsAdmin)
+            if (!player.IsServer && !player.IsAdmin)
                 return;
 
             if (args.Length != 1)
@@ -53,11 +51,11 @@ namespace Oxide.Plugins
             //TODO: Validate token?
 
             _config.ApiToken = args[0];
-            Config.WriteObject(_config, true);
+            SaveConfig();
 
             UpdateHeaders();
 
-            player.Reply("Token set!");
+            player.Reply("Successfully set the PayNow API token!");
         }
 
         #endregion
@@ -66,6 +64,10 @@ namespace Oxide.Plugins
 
         void GetPendingCommands()
         {
+            // Don't make the API call if we don't have a token
+            if (string.IsNullOrEmpty(_config.ApiToken))
+                return;
+            
             try
             {
                 // Make the API call
@@ -169,7 +171,8 @@ namespace Oxide.Plugins
             }
 
             // Log the amount of commands we executed
-            Puts($"Received {queuedCommands.Length.ToString()} and executed {_successfulCommandsList.Count.ToString()} commands!");
+            if (_config.LogCommandExecutions)
+                Puts($"Received {queuedCommands.Length.ToString()} and executed {_successfulCommandsList.Count.ToString()} commands!");
 
             // Acknowledge the commands
             AcknowledgeCommands(_successfulCommandsList);
@@ -210,13 +213,40 @@ namespace Oxide.Plugins
         [Serializable]
         class PluginConfig
         {
-            public string ApiToken;
+            [JsonProperty("API token")]
+            public string ApiToken = string.Empty;
+            
+            [JsonProperty("Time between API checks in seconds")]
             public float ApiCheckIntervalSeconds = 10;
+            
+            [JsonProperty("Log command executions")]
+            public bool LogCommandExecutions = true;
+            
+            // Backwards compatibility
+            [JsonProperty("ApiToken")]
+            public string OldApiToken { set { ApiToken = value; } }
+
+            [JsonProperty("ApiCheckIntervalSeconds")]
+            public float OldApiCheckIntervalSeconds { set { ApiCheckIntervalSeconds = value; } }
         }
 
         protected override void LoadDefaultConfig()
         {
-            Config.WriteObject(new PluginConfig(), true);
+            _config = new PluginConfig();
+        }
+
+        protected override void LoadConfig()
+        {
+            base.LoadConfig();
+
+            _config = Config.ReadObject<PluginConfig>();
+
+            SaveConfig();
+        }
+
+        protected override void SaveConfig()
+        {
+            Config.WriteObject(_config, true);
         }
 
         #endregion
