@@ -32,6 +32,11 @@ namespace Oxide.Plugins
                 PrintWarning("No API token set! Use the 'paynow.token <token>' command to set it.");
                 
             UpdateHeaders();
+        }
+
+        [HookMethod("OnServerInitialized")]
+        void OnServerInitialized()
+        {
             GetPendingCommands();
             timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
         }
