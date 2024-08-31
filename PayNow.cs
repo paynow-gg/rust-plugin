@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json;
@@ -10,11 +10,12 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.8")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.9")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
-        const string API_URL = "https://api.paynow.gg/v1/delivery/command-queue/";
+        const string COMMAND_QUEUE_URL = "https://api.paynow.gg/v1/delivery/command-queue/";
+        const string GS_LINK_URL = "https://api.paynow.gg/v1/delivery/gameserver/link";
 
         PluginConfig _config;
 
@@ -22,24 +23,21 @@ namespace Oxide.Plugins
         readonly CommandHistory _executedCommands = new CommandHistory(25);
         readonly StringBuilder _cachedStringBuilder = new StringBuilder();
         readonly List<string> _successfulCommandsList = new List<string>(1000);
+        Timer _pendingCommandsTimer;
 
         #region Oxide
-        
+
         [HookMethod("Loaded")]
         void Loaded()
         {
             if (string.IsNullOrEmpty(_config.ApiToken))
                 PrintWarning("No API token set! Use the 'paynow.token <token>' command to set it.");
-                
+
             UpdateHeaders();
         }
 
         [HookMethod("OnServerInitialized")]
-        void OnServerInitialized()
-        {
-            GetPendingCommands();
-            timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
-        }
+        void OnServerInitialized() => ValidateToken();
 
         [Command("paynow.token")]
         void CommandToken(IPlayer player, string command, string[] args)
@@ -53,30 +51,93 @@ namespace Oxide.Plugins
                 return;
             }
 
-            //TODO: Validate token?
-
+            StopPendingCommandsLoop();
             _config.ApiToken = args[0];
             SaveConfig();
-
             UpdateHeaders();
 
-            player.Reply("Successfully set the PayNow API token!");
+            player.Reply("Successfully saved the PayNow API token! Attempting to validate it...");
+            ValidateToken();
         }
+
+        void ValidateToken() => LinkGameServer((success, message) =>
+        {
+            if (!success)
+            {
+                Puts("PayNow API token failed to validate! " + message);
+                return;
+            }
+
+            Puts("PayNow API token validated successfully! Checking for pending commands!");
+            StartPendingCommandsLoop();
+        });
+
+        void StartPendingCommandsLoop()
+        {
+            if (_pendingCommandsTimer != null) return;
+            GetPendingCommands();
+            timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
+        }
+
+        void StopPendingCommandsLoop() => timer.Destroy(ref _pendingCommandsTimer);
 
         #endregion
 
         #region WebRequests
+
+        void LinkGameServer(Action<bool, string>? callback)
+        {
+            // Don't make the API call if we don't have a token
+            if (string.IsNullOrEmpty(_config.ApiToken))
+                return;
+
+            var data = new LinkGameServerRequest
+            {
+                Ip = server.Address.ToString(),
+                Hostname = server.Name,
+                Platform = game,
+                Version = Version.ToString()
+            };
+
+            try
+            {
+                // Make the API call
+                webrequest.Enqueue(GS_LINK_URL, JsonConvert.SerializeObject(data), (code, response) =>
+                {
+                    // Server Exception has occurred, we need to retry.
+                    if (code >= 500)
+                    {
+                        LinkGameServer(callback);
+                        return;
+                    }
+
+                    // Check if we got a valid response....
+                    if (code != 200)
+                    {
+                        callback?.Invoke(false, response);
+                        return;
+                    }
+
+                    callback?.Invoke(true, null);
+                }, this, RequestMethod.POST, _headers);
+            }
+            catch (Exception ex)
+            {
+                PrintException("Failed retrieve get pending commands", ex);
+                callback?.Invoke(false, ex.Message);
+            }
+        }
 
         void GetPendingCommands()
         {
             // Don't make the API call if we don't have a token
             if (string.IsNullOrEmpty(_config.ApiToken))
                 return;
-            
+
             try
             {
                 // Make the API call
-                webrequest.Enqueue(API_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers);
+                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers);
             }
             catch (Exception ex)
             {
@@ -114,7 +175,7 @@ namespace Oxide.Plugins
             try
             {
                 // Make the API call to acknowledge the commands
-                webrequest.Enqueue(API_URL, BuildAcknowledgeJson(commandsIds), HandleAcknowledgeCommands, this, RequestMethod.DELETE, _headers);
+                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildAcknowledgeJson(commandsIds), HandleAcknowledgeCommands, this, RequestMethod.DELETE, _headers);
             }
             catch (Exception ex)
             {
@@ -128,7 +189,8 @@ namespace Oxide.Plugins
             if (code >= 200 && code < 300) return;
 
             // Log an error if we didn't get a 204 response
-            PrintError($"Command acknowledgement resulted in an unexpected response code: ({code.ToString()}) ({response})");
+            PrintError(
+                $"Command acknowledgement resulted in an unexpected response code: ({code.ToString()}) ({response})");
         }
 
         #endregion
@@ -177,7 +239,8 @@ namespace Oxide.Plugins
 
             // Log the amount of commands we executed
             if (_config.LogCommandExecutions)
-                Puts($"Received {queuedCommands.Length.ToString()} and executed {_successfulCommandsList.Count.ToString()} commands!");
+                Puts(
+                    $"Received {queuedCommands.Length.ToString()} and executed {_successfulCommandsList.Count.ToString()} commands!");
 
             // Acknowledge the commands
             AcknowledgeCommands(_successfulCommandsList);
@@ -188,7 +251,7 @@ namespace Oxide.Plugins
             // Run the command
             server.Command(command);
 
-            // TODO: Fetch Command Response, currently not possible when using oxide covalence libraries 
+            // TODO: Fetch Command Response, currently not possible when using oxide covalence libraries
 
             return true;
         }
@@ -211,6 +274,18 @@ namespace Oxide.Plugins
             [JsonProperty("queued_at")] public string QueuedAt;
         }
 
+        [Serializable]
+        public class LinkGameServerRequest
+        {
+            [JsonProperty("ip")] public string Ip;
+
+            [JsonProperty("hostname")] public string Hostname;
+
+            [JsonProperty("platform")] public string Platform;
+
+            [JsonProperty("version")] public string Version;
+        }
+
         #endregion
 
         #region Configuration
@@ -218,21 +293,26 @@ namespace Oxide.Plugins
         [Serializable]
         class PluginConfig
         {
-            [JsonProperty("API token")]
-            public string ApiToken = string.Empty;
-            
+            [JsonProperty("API token")] public string ApiToken = string.Empty;
+
             [JsonProperty("Time between API checks in seconds")]
             public float ApiCheckIntervalSeconds = 10;
-            
+
             [JsonProperty("Log command executions")]
             public bool LogCommandExecutions = true;
-            
+
             // Backwards compatibility
             [JsonProperty("ApiToken")]
-            public string OldApiToken { set { ApiToken = value; } }
+            public string OldApiToken
+            {
+                set { ApiToken = value; }
+            }
 
             [JsonProperty("ApiCheckIntervalSeconds")]
-            public float OldApiCheckIntervalSeconds { set { ApiCheckIntervalSeconds = value; } }
+            public float OldApiCheckIntervalSeconds
+            {
+                set { ApiCheckIntervalSeconds = value; }
+            }
         }
 
         protected override void LoadDefaultConfig()
