@@ -10,7 +10,7 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.9")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.10")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
@@ -60,21 +60,12 @@ namespace Oxide.Plugins
             ValidateToken();
         }
 
-        void ValidateToken() => LinkGameServer((success, message) =>
-        {
-            if (!success)
-            {
-                Puts("PayNow API token failed to validate! " + message);
-                return;
-            }
-
-            Puts("PayNow API token validated successfully! Checking for pending commands!");
-            StartPendingCommandsLoop();
-        });
+        void ValidateToken() => LinkGameServer(StartPendingCommandsLoop);
 
         void StartPendingCommandsLoop()
         {
             if (_pendingCommandsTimer != null) return;
+            Puts("Started checking for pending commands");
             GetPendingCommands();
             timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
         }
@@ -85,7 +76,7 @@ namespace Oxide.Plugins
 
         #region WebRequests
 
-        void LinkGameServer(Action<bool, string>? callback)
+        void LinkGameServer(Action continuationCallback)
         {
             // Don't make the API call if we don't have a token
             if (string.IsNullOrEmpty(_config.ApiToken))
@@ -93,7 +84,7 @@ namespace Oxide.Plugins
 
             var data = new LinkGameServerRequest
             {
-                Ip = server.Address.ToString(),
+                Ip = server.Address + ":" + server.Port,
                 Hostname = server.Name,
                 Platform = game,
                 Version = Version.ToString()
@@ -102,30 +93,70 @@ namespace Oxide.Plugins
             try
             {
                 // Make the API call
-                webrequest.Enqueue(GS_LINK_URL, JsonConvert.SerializeObject(data), (code, response) =>
-                {
-                    // Server Exception has occurred, we need to retry.
-                    if (code >= 500)
-                    {
-                        LinkGameServer(callback);
-                        return;
-                    }
-
-                    // Check if we got a valid response....
-                    if (code != 200)
-                    {
-                        callback?.Invoke(false, response);
-                        return;
-                    }
-
-                    callback?.Invoke(true, null);
-                }, this, RequestMethod.POST, _headers);
+                webrequest.Enqueue(GS_LINK_URL, JsonConvert.SerializeObject(data), (code, responseString) => HandleLinkGameServerResponse(code, responseString, continuationCallback), this, RequestMethod.POST, _headers);
             }
             catch (Exception ex)
             {
-                PrintException("Failed retrieve get pending commands", ex);
-                callback?.Invoke(false, ex.Message);
+                PrintException("Failure initiate game server link request to PayNow, trying again in 5 seconds...", ex);
+                timer.In(5, () => LinkGameServer(continuationCallback));
+                return;
             }
+        }
+
+        void HandleLinkGameServerResponse(int code, string responseString, Action continuationCallback)
+        {
+            // Check we are authorised to be here...
+            if (code == 401 || code == 403)
+            {
+                PrintError("Failure linking game server to PayNow, invalid token supplied. Please update your token and try again");
+                return;
+            }
+
+            // Check if we got a valid response code....
+            if (code >= 500)
+            {
+                PrintWarning("Failure linking game server to PayNow, trying again in 5 seconds...");
+                timer.In(5, () => LinkGameServer(continuationCallback));
+                return;
+            }
+
+            LinkGameServerResponse response;
+            try
+            {
+                response = JsonConvert.DeserializeObject<LinkGameServerResponse>(responseString);
+            }
+            catch (Exception ex)
+            {
+                PrintException("Failure whilst deserializing link game server response, trying again in 5 seconds...", ex);
+                timer.In(5, () => LinkGameServer(continuationCallback));
+                return;
+            }
+
+            if (response == null)
+            {
+                PrintError("PayNow API returned a null link game server response, trying again in 5 seconds...");
+                timer.In(5, () => LinkGameServer(continuationCallback));
+                return;
+            }
+
+            if (response.UpdateAvailable)
+            {
+                Puts("Update available! latest version: {0}, current version: {1}", response.LatestVersion, Version.ToString());
+            }
+
+            if (response.PreviouslyLinked != null)
+            {
+                PrintWarning("This token has been previously used on \"{0}\" ({1}), ensure you have removed this token from the previous server.", response.PreviouslyLinked.HostName, response.PreviouslyLinked.IP);
+            }
+
+            if (response.GameServer == null)
+            {
+                PrintError("PayNow API did not return a GameServer object, this may be a transient issue, please try again or contact support.");
+                return;
+            }
+
+            Puts("Connected to PayNow using the token for \"{0}\" ({1}) successfully!", response.GameServer.Name, response.GameServer.Id);
+            continuationCallback?.Invoke();
         }
 
         void GetPendingCommands()
@@ -284,6 +315,34 @@ namespace Oxide.Plugins
             [JsonProperty("platform")] public string Platform;
 
             [JsonProperty("version")] public string Version;
+        }
+
+        [Serializable]
+        public class LinkGameServerResponse
+        {
+            [JsonProperty("update_available")] public bool UpdateAvailable { get; set; }
+
+            [JsonProperty("latest_version")] public string LatestVersion { get; set; }
+
+            [JsonProperty("previously_linked")] public PreviouslyLinkedData PreviouslyLinked { get; set; }
+
+            [JsonProperty("gameserver")] public GameServerData GameServer { get; set; }
+
+            public class PreviouslyLinkedData
+            {
+                [JsonProperty("ip")] public string IP { get; set; }
+                [JsonProperty("host_name")] public string HostName { get; set; }
+                [JsonProperty("last_linked_at")] public DateTime LastLinkedAt { get; set; }
+            }
+
+            public class GameServerData
+            {
+                [JsonProperty("id")] public long Id { get; set; }
+                [JsonProperty("store_id")] public long StoreId { get; set; }
+                [JsonProperty("name")] public string Name { get; set; }
+                [JsonProperty("created_at")] public DateTime? CreatedAt { get; set; }
+                [JsonProperty("updated_at")] public DateTime? UpdatedAt { get; set; }
+            }
         }
 
         #endregion
