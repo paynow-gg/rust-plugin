@@ -10,7 +10,7 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.10")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.12")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
@@ -22,7 +22,7 @@ namespace Oxide.Plugins
         readonly Dictionary<string, string> _headers = new Dictionary<string, string>();
         readonly CommandHistory _executedCommands = new CommandHistory(25);
         readonly StringBuilder _cachedStringBuilder = new StringBuilder();
-        readonly List<string> _successfulCommandsList = new List<string>(1000);
+        readonly HashSet<string> _commandsToAcknowledge = new HashSet<string>(1000);
         Timer _pendingCommandsTimer;
 
         #region Oxide
@@ -168,7 +168,7 @@ namespace Oxide.Plugins
             try
             {
                 // Make the API call
-                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers);
+                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers, _config.ApiCheckIntervalSeconds);
             }
             catch (Exception ex)
             {
@@ -198,7 +198,7 @@ namespace Oxide.Plugins
             }
         }
 
-        void AcknowledgeCommands(List<string> commandsIds)
+        void AcknowledgeCommands(HashSet<string> commandsIds)
         {
             // Check if we have any order ids to acknowledge
             if (commandsIds.Count == 0) return;
@@ -234,14 +234,18 @@ namespace Oxide.Plugins
             if (queuedCommands.Length == 0)
                 return;
 
-            _successfulCommandsList.Clear();
+            int executedCommands = 0;
+            _commandsToAcknowledge.Clear();
             for (int i = 0; i < queuedCommands.Length; i++)
             {
                 QueuedCommand command = queuedCommands[i];
 
                 // Make sure we don't execute the same command twice
                 if (_executedCommands.Contains(command.AttemptId))
+                {
+                    _commandsToAcknowledge.Add(command.AttemptId);
                     continue;
+                }
 
                 try
                 {
@@ -252,7 +256,8 @@ namespace Oxide.Plugins
                     if (ExecuteCommand(command.Command))
                     {
                         // Add the order id to the list of acknowledged orders
-                        _successfulCommandsList.Add(command.AttemptId);
+                        executedCommands += 1;
+                        _commandsToAcknowledge.Add(command.AttemptId);
                         _executedCommands.Add(command.AttemptId);
                     }
                     else
@@ -271,10 +276,10 @@ namespace Oxide.Plugins
             // Log the amount of commands we executed
             if (_config.LogCommandExecutions)
                 Puts(
-                    $"Received {queuedCommands.Length.ToString()} and executed {_successfulCommandsList.Count.ToString()} commands!");
+                    $"Received {queuedCommands.Length.ToString()} and executed {executedCommands.ToString()} commands!");
 
             // Acknowledge the commands
-            AcknowledgeCommands(_successfulCommandsList);
+            AcknowledgeCommands(_commandsToAcknowledge);
         }
 
         bool ExecuteCommand(string command)
@@ -403,22 +408,24 @@ namespace Oxide.Plugins
             _headers["Authorization"] = "Gameserver " + _config.ApiToken;
         }
 
-        string BuildAcknowledgeJson(List<string> orderIds)
+        string BuildAcknowledgeJson(HashSet<string> orderIds)
         {
             _cachedStringBuilder.Clear();
 
             // Json format [{"attempt_id": "123"}]
             _cachedStringBuilder.Append("[");
-            for (int i = 0; i < orderIds.Count; i++)
-            {
-                _cachedStringBuilder.Append("{\"attempt_id\": \"");
-                _cachedStringBuilder.Append(orderIds[i]);
-                _cachedStringBuilder.Append("\"}");
 
-                if (i < orderIds.Count - 1)
+            if (orderIds.Count > 0)
+            {
+                foreach (var element in orderIds)
                 {
+                    _cachedStringBuilder.Append("{\"attempt_id\": \"");
+                    _cachedStringBuilder.Append(element);
+                    _cachedStringBuilder.Append("\"}");
                     _cachedStringBuilder.Append(",");
                 }
+
+                _cachedStringBuilder.Remove(_cachedStringBuilder.Length - 1, 1);
             }
 
             _cachedStringBuilder.Append("]");
