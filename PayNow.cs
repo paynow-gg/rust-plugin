@@ -10,7 +10,7 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.12")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.13")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
@@ -52,7 +52,7 @@ namespace Oxide.Plugins
             }
 
             StopPendingCommandsLoop();
-            _config.ApiToken = args[0];
+            _config.ApiToken = args[0]?.Trim();
             SaveConfig();
             UpdateHeaders();
 
