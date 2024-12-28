@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json;
@@ -10,7 +10,7 @@ using System.Text;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.13")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.14")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
@@ -167,8 +167,13 @@ namespace Oxide.Plugins
 
             try
             {
+                // Don't check the player list if disabled for servers that don't care about this functionality
+                // Adds in an empty list to maintain compatibility for the API
+                string payload = _config.EnableOnlinePlayerReporting 
+                ? BuildOnlinePlayersJson() 
+                : "{\"steam_ids\":[]}";
                 // Make the API call
-                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers, _config.ApiCheckIntervalSeconds);
+                webrequest.Enqueue(COMMAND_QUEUE_URL, payload, HandlePendingCommands, this, RequestMethod.POST, _headers, _config.ApiCheckIntervalSeconds);
             }
             catch (Exception ex)
             {
@@ -304,7 +309,7 @@ namespace Oxide.Plugins
             [JsonProperty("steam_id")] public string SteamId;
 
             [JsonProperty("command")] public string Command;
-
+            // Allow servers to disable online player checks
             [JsonProperty("online_only")] public bool OnlineOnly;
 
             [JsonProperty("queued_at")] public string QueuedAt;
@@ -364,6 +369,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Log command executions")]
             public bool LogCommandExecutions = true;
+
+            [JsonProperty("Enable online player reporting")]
+            public bool EnableOnlinePlayerReporting = true;
 
             // Backwards compatibility
             [JsonProperty("ApiToken")]
