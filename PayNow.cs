@@ -1,30 +1,37 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json;
 using Oxide.Core;
-using Oxide.Core.Libraries;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using System.Text;
+using Oxide.Core.Unity;
+using Oxide.Plugins.PayNowExtensions;
+using UnityEngine;
+using UnityEngine.Networking;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.13")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.14")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
         const string COMMAND_QUEUE_URL = "https://api.paynow.gg/v1/delivery/command-queue/";
         const string GS_LINK_URL = "https://api.paynow.gg/v1/delivery/gameserver/link";
+        const string EVENTS_URL = "https://api.paynow.gg/v1/delivery/events";
 
         PluginConfig _config;
 
         readonly Dictionary<string, string> _headers = new Dictionary<string, string>();
         readonly CommandHistory _executedCommands = new CommandHistory(25);
         readonly StringBuilder _cachedStringBuilder = new StringBuilder();
-        readonly HashSet<string> _commandsToAcknowledge = new HashSet<string>(1000);
-        Timer _pendingCommandsTimer;
-
+        readonly HashSet<string> _commandsToAcknowledge = new HashSet<string>();
+        readonly HashSet<DeliveryEvent> _pendingEvents = new HashSet<DeliveryEvent>();
+        private Timer _pendingCommandsTimer;
+        private Timer _eventsTimer;
+        
         #region Oxide
 
         [HookMethod("Loaded")]
@@ -39,6 +46,17 @@ namespace Oxide.Plugins
         [HookMethod("OnServerInitialized")]
         void OnServerInitialized() => ValidateToken();
 
+        [HookMethod("OnUserConnected")]
+        void OnUserConnected(IPlayer player)
+        {
+            _pendingEvents.Add(new DeliveryEvent
+            {
+                IpAddress = player.Address,
+                SteamId = player.Id,
+                Timestamp = DateTime.UtcNow.ToString("o")
+            });
+        }
+        
         [Command("paynow.token")]
         void CommandToken(IPlayer player, string command, string[] args)
         {
@@ -51,7 +69,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            StopPendingCommandsLoop();
+            StopTimers();
             _config.ApiToken = args[0]?.Trim();
             SaveConfig();
             UpdateHeaders();
@@ -60,17 +78,34 @@ namespace Oxide.Plugins
             ValidateToken();
         }
 
-        void ValidateToken() => LinkGameServer(StartPendingCommandsLoop);
+        void ValidateToken() => LinkGameServer(StartTimers);
 
+        void StartTimers()
+        {
+            StartPendingCommandsLoop();
+            StartEventsLoop();
+        }
+        
         void StartPendingCommandsLoop()
         {
             if (_pendingCommandsTimer != null) return;
             Puts("Started checking for pending commands");
             GetPendingCommands();
-            timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
+            _pendingCommandsTimer = timer.Every(_config.ApiCheckIntervalSeconds, GetPendingCommands);
+        }
+        
+        void StartEventsLoop()
+        {
+            if (_eventsTimer != null) return;
+            SendPendingEvents();
+            _eventsTimer = timer.Every(60, SendPendingEvents);
         }
 
-        void StopPendingCommandsLoop() => timer.Destroy(ref _pendingCommandsTimer);
+        void StopTimers()
+        {
+            timer.Destroy(ref _pendingCommandsTimer);
+            timer.Destroy(ref _eventsTimer);
+        }
 
         #endregion
 
@@ -93,7 +128,7 @@ namespace Oxide.Plugins
             try
             {
                 // Make the API call
-                webrequest.Enqueue(GS_LINK_URL, JsonConvert.SerializeObject(data), (code, responseString) => HandleLinkGameServerResponse(code, responseString, continuationCallback), this, RequestMethod.POST, _headers);
+                SendWebRequest(HandlePostRequest(GS_LINK_URL, JsonConvert.SerializeObject(data), (code, responseString) => HandleLinkGameServerResponse(code, responseString, continuationCallback), _headers));
             }
             catch (Exception ex)
             {
@@ -168,7 +203,7 @@ namespace Oxide.Plugins
             try
             {
                 // Make the API call
-                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildOnlinePlayersJson(), HandlePendingCommands, this, RequestMethod.POST, _headers, _config.ApiCheckIntervalSeconds);
+                SendWebRequest(HandlePostRequest(COMMAND_QUEUE_URL, BuildOnlinePlayersJson(), HandlePendingCommands, _headers));
             }
             catch (Exception ex)
             {
@@ -206,7 +241,7 @@ namespace Oxide.Plugins
             try
             {
                 // Make the API call to acknowledge the commands
-                webrequest.Enqueue(COMMAND_QUEUE_URL, BuildAcknowledgeJson(commandsIds), HandleAcknowledgeCommands, this, RequestMethod.DELETE, _headers);
+                SendWebRequest(HandlePostRequest(COMMAND_QUEUE_URL, BuildAcknowledgeJson(commandsIds), HandleAcknowledgeCommands, _headers, "DELETE"));
             }
             catch (Exception ex)
             {
@@ -224,6 +259,40 @@ namespace Oxide.Plugins
                 $"Command acknowledgement resulted in an unexpected response code: ({code.ToString()}) ({response})");
         }
 
+        void SendPendingEvents()
+        {
+            // Don't make the API call if we don't have a token
+            if (string.IsNullOrEmpty(_config.ApiToken))
+                return;
+            
+            // Check if we have any pending events
+            if (_pendingEvents.Count == 0)
+                return;
+
+            try
+            {
+                // Make the API call to send the events
+                SendWebRequest(HandlePostRequest(EVENTS_URL, BuildPendingEventsJson(), HandleSendPendingEvents, _headers));
+            }
+            catch (Exception ex)
+            {
+                PrintException("Failed to send pending events", ex);
+            }
+        }
+        
+        void HandleSendPendingEvents(int code, string response)
+        {
+            // Check if we got a valid response
+            if (code >= 200 && code < 300)
+            {
+                _pendingEvents.Clear();
+                return;
+            }
+
+            // Log an error if we didn't get a 204 response
+            PrintError($"Sending pending events resulted in an unexpected response code: ({code}) ({response})");
+        }
+        
         #endregion
 
         #region Command Processing
@@ -350,6 +419,41 @@ namespace Oxide.Plugins
             }
         }
 
+        #endregion
+        
+        #region Delivery Event
+
+        private string BuildPendingEventsJson()
+        {
+            _cachedStringBuilder.Clear();
+            _cachedStringBuilder.Append("[");
+            
+            if (_pendingEvents.Count > 0)
+            {
+                foreach (var element in _pendingEvents)
+                {
+                    _cachedStringBuilder.Append("{\"event\":\"player_join\",\"player_join\":{");
+                    _cachedStringBuilder.AppendFormat("\"ip_address\":\"{0}\",", element.IpAddress);
+                    _cachedStringBuilder.AppendFormat("\"steam_id\":\"{0}\"", element.SteamId);
+                    _cachedStringBuilder.Append("},");
+                    _cachedStringBuilder.AppendFormat("\"timestamp\":\"{0}\"", element.Timestamp);
+                    _cachedStringBuilder.Append("},");
+                }
+
+                _cachedStringBuilder.Remove(_cachedStringBuilder.Length - 1, 1);
+            }
+            
+            _cachedStringBuilder.Append("]");
+            return _cachedStringBuilder.ToString();
+        }
+
+        private struct DeliveryEvent
+        {
+            public string IpAddress;
+            public string SteamId;
+            public string Timestamp;
+        }
+        
         #endregion
 
         #region Configuration
@@ -481,5 +585,81 @@ namespace Oxide.Plugins
         void PrintException(string message, Exception ex) => Interface.Oxide.LogException($"[{Title}] {message}", ex);
 
         #endregion
+        
+        #region Unity WebRequest
+        
+        private MonoBehaviour _monoBehaviour = UnityScript.Instance.GetComponent<MonoBehaviour>();
+
+        private void SendWebRequest(IEnumerator webRequestCoroutine)
+        {
+            _monoBehaviour.StartCoroutine(webRequestCoroutine);
+        }
+        
+        private static IEnumerator HandlePostRequest(string url, string jsonData, Action<int, string> callback, Dictionary<string, string> headers = null, string method = "POST")
+        {
+            // Convert the JSON data to a byte array
+            byte[] postData = Encoding.UTF8.GetBytes(jsonData);
+
+            // Use UnityWebRequest to make a POST request
+            using (UnityWebRequest webRequest = new UnityWebRequest(url, method))
+            {
+                // Set the request body and headers
+                webRequest.uploadHandler = new UploadHandlerRaw(postData);
+                webRequest.downloadHandler = new DownloadHandlerBuffer();
+
+                if (headers != null)
+                {
+                    foreach (var header in headers)
+                    {
+                        webRequest.SetRequestHeader(header.Key, header.Value);
+                    }
+                }
+                
+                // Send the request and wait for a response
+                yield return webRequest.SendWebRequest();
+
+                // Check for errors
+                if(webRequest.IsError())
+                {
+                    // Log the error and invoke the callback with the error code
+                    callback?.Invoke((int) webRequest.responseCode, webRequest.error);
+                }
+                else
+                {
+                    // Invoke the callback with the response data
+                    callback?.Invoke((int) webRequest.responseCode, webRequest.downloadHandler.text);
+                }
+            }
+        }
+        
+        #endregion
+    }
+}
+
+namespace Oxide.Plugins.PayNowExtensions
+{
+    internal static class Extensions
+    {
+        public static bool IsError(this UnityWebRequest webRequest)
+        {
+#if HURTWORLD
+            return webRequest.isError;
+#else
+            return webRequest.result == UnityWebRequest.Result.ConnectionError || webRequest.result == UnityWebRequest.Result.ProtocolError;
+#endif
+        }
+
+#if HURTWORLD
+        public static AsyncOperation SendWebRequest(this UnityWebRequest webRequest)
+        {
+            return webRequest.Send();
+        }
+
+        public static void Clear(this StringBuilder stringBuilder)
+        {
+            stringBuilder.Length = 0;
+            stringBuilder.Capacity = 0;
+        }
+#endif
     }
 }
