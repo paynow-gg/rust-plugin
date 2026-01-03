@@ -589,13 +589,18 @@ namespace Oxide.Plugins
         #region Unity WebRequest
         
 #if RUST
-        private MonoBehaviour _monoBehaviour = ServerMgr.Instance;
+        private MonoBehaviour _monoBehaviour => ServerMgr.Instance;
 #else
         private MonoBehaviour _monoBehaviour = UnityScript.Instance.GetComponent<MonoBehaviour>();
 #endif
 
         private void SendWebRequest(IEnumerator webRequestCoroutine)
         {
+            if( _monoBehaviour == null )
+            {
+                throw new Exception("_monoBehaviour is null, cannot send web request!");
+            }
+            
             _monoBehaviour.StartCoroutine(webRequestCoroutine);
         }
         
