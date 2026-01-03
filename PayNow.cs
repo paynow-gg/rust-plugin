@@ -7,14 +7,16 @@ using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 using Oxide.Core.Plugins;
 using System.Text;
-using Oxide.Core.Unity;
 using Oxide.Plugins.PayNowExtensions;
 using UnityEngine;
 using UnityEngine.Networking;
+#if !RUST
+using Oxide.Core.Unity;
+#endif
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.16")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.17")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
