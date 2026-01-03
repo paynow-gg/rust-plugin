@@ -14,7 +14,7 @@ using UnityEngine.Networking;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.15")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.16")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
@@ -589,7 +589,7 @@ namespace Oxide.Plugins
         #region Unity WebRequest
         
 #if RUST
-        private MonoBehaviour _monoBehaviour => ServerMgr.Instance;
+        private MonoBehaviour _monoBehaviour = Rust.Global.Runner;
 #else
         private MonoBehaviour _monoBehaviour = UnityScript.Instance.GetComponent<MonoBehaviour>();
 #endif
