@@ -16,7 +16,7 @@ using Oxide.Core.Unity;
 
 namespace Oxide.Plugins
 {
-    [Info("PayNow", "PayNow Services Inc", "0.0.17")]
+    [Info("PayNow", "PayNow Services Inc", "0.0.18")]
     [Description("Official plugin for the PayNow.gg store integration.")]
     internal class PayNow : CovalencePlugin
     {
@@ -157,6 +157,14 @@ namespace Oxide.Plugins
                 return;
             }
 
+            // Check if we got a valid response code at all...
+            if(code != 200 || responseString == null)
+            {
+                PrintError($"Failure linking game server to PayNow, unexpected response code: ({code}) ({responseString}), trying again in 5 seconds...");
+                timer.In(5, () => LinkGameServer(continuationCallback));
+                return;
+            }
+
             LinkGameServerResponse response;
             try
             {
@@ -257,8 +265,7 @@ namespace Oxide.Plugins
             if (code >= 200 && code < 300) return;
 
             // Log an error if we didn't get a 204 response
-            PrintError(
-                $"Command acknowledgement resulted in an unexpected response code: ({code.ToString()}) ({response})");
+            PrintError($"Command acknowledgement resulted in an unexpected response code: ({code}) ({response})");
         }
 
         void SendPendingEvents()
@@ -617,6 +624,7 @@ namespace Oxide.Plugins
                 // Set the request body and headers
                 webRequest.uploadHandler = new UploadHandlerRaw(postData);
                 webRequest.downloadHandler = new DownloadHandlerBuffer();
+                webRequest.timeout = 30;
 
                 if (headers != null)
                 {
@@ -628,7 +636,7 @@ namespace Oxide.Plugins
                 
                 // Send the request and wait for a response
                 yield return webRequest.SendWebRequest();
-
+                
                 // Check for errors
                 if(webRequest.IsError())
                 {
